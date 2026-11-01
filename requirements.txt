@@ -1,0 +1,6 @@
+flet
+requests
+pynput
+keyboard
+pystray
+Pillow
