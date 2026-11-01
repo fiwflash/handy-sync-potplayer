@@ -1,5 +1,9 @@
 # Handy Sync for PotPlayer
 
+🌐 **Language:** [English](README.en.md) | [ภาษาไทย](README.md)
+
+---
+
 แอปพลิเคชัน GUI (สร้างด้วย Python + Flet) สำหรับเชื่อมต่อและควบคุมการทำงานของ The Handy ให้ซิงค์กับการเล่นวิดีโอบน PotPlayer อัตโนมัติแบบเรียลไทม์
 
 ---
@@ -22,6 +26,8 @@
 ├── handy_sync_flet_english.py  # Source code ภาษาอังกฤษ
 ├── requirements.txt            # รายการ Dependencies สำหรับ Python
 ├── icon.ico / .jpg / .png      # ไอคอนของโปรแกรม
+├── README.md                   # คู่มือภาษาไทย
+├── README.en.md                # คู่มือภาษาอังกฤษ
 └── .gitignore                  # กรองไฟล์ build, executable (.exe) และ backup
 ```
 
