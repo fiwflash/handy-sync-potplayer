@@ -125,6 +125,11 @@ class HandyClient:
         r.raise_for_status()
         return r.json().get("serverTime", int(time.time() * 1000))
 
+    def check_connected(self) -> bool:
+        r = self.session.get(f"{self.base}/connected", timeout=5)
+        r.raise_for_status()
+        return bool(r.json().get("connected", False))
+
     def measure_time_offset(self, samples: int = 6) -> tuple[int, int]:
         offsets, rtts = [], []
         for _ in range(samples):
@@ -242,10 +247,27 @@ def main(page: ft.Page):
 
     main_content = ft.Column(spacing=8, expand=True, scroll=ft.ScrollMode.AUTO)
 
+    btn_connect = ft.TextButton(
+        content="เชื่อมต่อ", icon=ft.Icons.WIFI, height=40,
+        style=ft.ButtonStyle(text_style=ft.TextStyle(size=12)),
+    )
+
     def show_snack(msg):
-        page.snack_bar = ft.SnackBar(content=ft.Text(msg, size=12))
-        page.snack_bar.open = True
-        page.update()
+        page.show_dialog(ft.SnackBar(content=ft.Text(msg, size=12)))
+
+    def apply_connect_button():
+        cs = state["conn_status"]
+        if cs == "connected":
+            btn_connect.content = "ตัดการเชื่อมต่อ"
+            btn_connect.icon = ft.Icons.LINK_OFF
+            btn_connect.disabled = False
+        elif cs == "connecting":
+            btn_connect.content = "กำลังเชื่อมต่อ..."
+            btn_connect.disabled = True
+        else:
+            btn_connect.content = "เชื่อมต่อใหม่"
+            btn_connect.icon = ft.Icons.WIFI
+            btn_connect.disabled = False
 
     # --- Status helpers ---
     def update_status_ui():
@@ -254,6 +276,8 @@ def main(page: ft.Page):
             lbl_conn.value = "● เชื่อมต่อแล้ว"; lbl_conn.color = ft.Colors.GREEN_400
         elif cs == "connecting":
             lbl_conn.value = "● กำลังเชื่อมต่อ..."; lbl_conn.color = ft.Colors.AMBER_400
+        elif cs == "offline":
+            lbl_conn.value = "● เครื่องไม่เชื่อมต่อ"; lbl_conn.color = ft.Colors.RED_400
         elif cs == "error":
             lbl_conn.value = "● เชื่อมต่อล้มเหลว"; lbl_conn.color = ft.Colors.RED_400
         else:
@@ -269,6 +293,8 @@ def main(page: ft.Page):
             lbl_sync.value = f"● {msg}"; lbl_sync.color = ft.Colors.RED_400
         else:
             lbl_sync.value = "● พร้อม"; lbl_sync.color = ft.Colors.GREY_500
+
+        apply_connect_button()
         try: page.update()
         except Exception: pass
 
@@ -337,20 +363,34 @@ def main(page: ft.Page):
             page.update()
         except ValueError: pass
 
-    def apply_tune(e=None):
+    async def apply_tune(e=None):
         try:
             val = int(tune_field.value)
             state["delay_presets"][state["current_delay_preset"]] = val
             state["tune_value"] = val
             save()
-            do_sync()
+            await do_sync()
         except ValueError:
             print("[LOG] Apply Tune ล้มเหลว")
 
-    def do_sync(e=None):
-        if not state["handy"] or not state["folder"]:
+    async def do_sync(e=None):
+        if not state["folder"]:
             set_sync_status("error", "ต้องตั้งค่าก่อน")
             show_snack("ต้องตั้งค่าก่อน")
+            return
+        if state["handy"] is None:
+            set_conn_status("disconnected")
+            set_sync_status("error", "ยังไม่ได้เชื่อมต่อ")
+            show_snack("กรุณาเชื่อมต่อก่อน")
+            return
+        try:
+            device_online = await asyncio.to_thread(state["handy"].check_connected)
+        except Exception:
+            device_online = False
+        if not device_online:
+            set_conn_status("offline")
+            set_sync_status("error", "เครื่องไม่เชื่อมต่อ")
+            show_snack("เครื่อง The Handy ยังไม่เปิด กรุณาเปิดเครื่องก่อน")
             return
         hwnd = find_potplayer()
         if not hwnd:
@@ -368,19 +408,21 @@ def main(page: ft.Page):
             set_sync_status("error", "ไม่พบไฟล์สคริปต์")
             show_snack(f"ไม่พบ {script_path.name}")
             return
+        set_sync_status("syncing")
         try:
-            set_sync_status("syncing")
-            if filename not in state["loaded_scripts"]:
-                url = upload_script_to_handy(str(script_path))
-                state["loaded_scripts"][filename] = url
-                state["handy"].setup_script(url)
-            mn, mx = state["stroke_presets"].get(state["current_stroke"], (0, 100))
-            state["handy"].set_slide(mn, mx)
-            hwnd = find_potplayer()
-            video_pos = get_potplayer_state(hwnd)["current_ms"]
-            offset = state["delay_presets"].get(state["current_delay_preset"], 0)
-            compensation = state["handy"].last_rtt_ms // 2
-            state["handy"].play(video_pos + compensation + offset, state["handy"].estimated_server_time())
+            def _network():
+                if filename not in state["loaded_scripts"]:
+                    url = upload_script_to_handy(str(script_path))
+                    state["loaded_scripts"][filename] = url
+                    state["handy"].setup_script(url)
+                mn, mx = state["stroke_presets"].get(state["current_stroke"], (0, 100))
+                state["handy"].set_slide(mn, mx)
+                hwnd2 = find_potplayer()
+                video_pos = get_potplayer_state(hwnd2)["current_ms"]
+                offset = state["delay_presets"].get(state["current_delay_preset"], 0)
+                compensation = state["handy"].last_rtt_ms // 2
+                state["handy"].play(video_pos + compensation + offset, state["handy"].estimated_server_time())
+            await asyncio.to_thread(_network)
             set_sync_status("ok")
             show_snack("Sync สำเร็จ")
         except Exception as ex:
@@ -391,25 +433,45 @@ def main(page: ft.Page):
             set_sync_status("error", "Sync ล้มเหลว")
             show_snack(f"Sync error: {ex}")
 
-    def reconnect(e=None):
+    async def reconnect(e=None):
         set_conn_status("connecting")
         if not state["key"]:
             set_conn_status("error")
             show_snack("ตั้ง connection key ก่อน")
             return
         try:
-            state["handy"] = HandyClient(state["key"])
-            _, rtt = state["handy"].measure_time_offset()
-            set_conn_status("connected")
-            show_snack(f"เชื่อมต่อแล้ว RTT: {rtt} ms")
+            client = HandyClient(state["key"])
+            _, rtt = await asyncio.to_thread(client.measure_time_offset)
+            device_online = await asyncio.to_thread(client.check_connected)
+            state["handy"] = client
+            if device_online:
+                set_conn_status("connected")
+                show_snack(f"เชื่อมต่อแล้ว RTT: {rtt} ms")
+            else:
+                set_conn_status("offline")
+                show_snack("เครื่อง The Handy ยังไม่เปิด กรุณาเปิดเครื่องก่อน")
         except Exception as ex:
             print(f"[LOG] Connect failed: {ex}")
             set_conn_status("error")
             show_snack(f"Error: {ex}")
 
-    def select_stroke(name: str):
+    def disconnect(e=None):
+        state["handy"] = None
+        state["loaded_scripts"] = {}
+        set_conn_status("disconnected")
+        show_snack("ตัดการเชื่อมต่อแล้ว")
+
+    async def connect_toggle(e=None):
+        if state["conn_status"] == "connected":
+            disconnect()
+        else:
+            await reconnect()
+
+    btn_connect.on_click = connect_toggle
+
+    async def select_stroke(name: str):
         state["current_stroke"] = name
-        do_sync()
+        await do_sync()
 
     # --- Pages ---
     def show_home():
@@ -427,7 +489,7 @@ def main(page: ft.Page):
 
         btn_row = ft.Row([
             ft.IconButton(ft.Icons.SYNC, tooltip="Sync", on_click=do_sync, icon_size=24, width=40, height=40, padding=0),
-            ft.IconButton(ft.Icons.WIFI, tooltip="เชื่อมต่อ", on_click=reconnect, icon_size=24, width=40, height=40, padding=0),
+            btn_connect,
             ft.IconButton(ft.Icons.SETTINGS, tooltip="ตั้งค่า", on_click=lambda e: show_settings(), icon_size=24, width=40, height=40, padding=0),
             ft.IconButton(ft.Icons.GAMEPAD, tooltip="Stroke", on_click=lambda e: show_stroke(), icon_size=24, width=40, height=40, padding=0),
         ], alignment=ft.MainAxisAlignment.SPACE_EVENLY)
@@ -438,6 +500,7 @@ def main(page: ft.Page):
             ft.Divider(height=1), status_col,
             btn_row,
         ])
+        apply_connect_button()
         page.update()
 
     def show_stroke():
@@ -598,9 +661,7 @@ def main(page: ft.Page):
             content=ft.Column(menu_items, tight=True),
             actions=[], actions_alignment=ft.MainAxisAlignment.END,
         )
-        page.overlay.append(dlg)
-        dlg.open = True
-        page.update()
+        page.show_dialog(dlg)
 
     drag_area = ft.WindowDragArea(
         content=ft.Container(
@@ -624,6 +685,7 @@ def main(page: ft.Page):
     ))
 
     async def refresh_loop():
+        tick = 0
         while True:
             hwnd = find_potplayer()
             if hwnd:
@@ -635,12 +697,22 @@ def main(page: ft.Page):
             if state["sync_status"] in ("ok", "error"):
                 if time.time() - state["sync_status_at"] > 3.0:
                     set_sync_status("idle")
+            tick += 1
+            if tick % 5 == 0 and state["handy"] is not None and state["conn_status"] != "connecting":
+                try:
+                    device_online = await asyncio.to_thread(state["handy"].check_connected)
+                    if device_online and state["conn_status"] != "connected":
+                        set_conn_status("connected")
+                    elif not device_online and state["conn_status"] != "offline":
+                        set_conn_status("offline")
+                except Exception:
+                    pass
             await asyncio.sleep(1)
 
     async def process_events():
         while True:
             event = await event_queue.get()
-            if event == "SYNC": do_sync()
+            if event == "SYNC": await do_sync()
             event_queue.task_done()
 
     def setup_global_hotkeys():
@@ -671,12 +743,20 @@ def main(page: ft.Page):
     setup_tray()
 
     if state["key"]:
-        try:
-            state["handy"] = HandyClient(state["key"])
-            state["handy"].measure_time_offset()
-            set_conn_status("connected")
-        except Exception:
-            set_conn_status("error")
+        state["handy"] = HandyClient(state["key"])
+
+        async def _initial_connect():
+            try:
+                await asyncio.to_thread(state["handy"].measure_time_offset)
+                device_online = await asyncio.to_thread(state["handy"].check_connected)
+                if device_online:
+                    set_conn_status("connected")
+                else:
+                    set_conn_status("offline")
+            except Exception:
+                set_conn_status("error")
+
+        page.run_task(_initial_connect)
     else:
         set_conn_status("disconnected")
 

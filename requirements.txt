@@ -1,4 +1,4 @@
-flet
+flet[desktop]>=1.1.2
 requests
 pynput
 keyboard
