@@ -183,12 +183,11 @@ def main(page: ft.Page):
         "key": "",
         "handy": None,
         "loaded_scripts": {},
-        "delay_presets": {"Speaker": 0, "Wireless": 150},
-        "current_delay_preset": "Speaker",
+        "delay_offset": 0,
         "stroke_presets": {"Full": (0, 100), "Short": (20, 80), "Mid": (30, 70)},
+        "stroke_shortcuts": {},
         "current_stroke": "Full",
         "sync_shortcut": "X1",
-        "tune_value": 0,
         "opacity": 1.0,
         "conn_status": "disconnected",
         "sync_status": "idle",
@@ -201,9 +200,9 @@ def main(page: ft.Page):
     def save():
         save_config({
             "folder": state["folder"], "key": state["key"],
-            "delay_presets": state["delay_presets"],
-            "current_delay_preset": state["current_delay_preset"],
+            "delay_offset": state["delay_offset"],
             "stroke_presets": state["stroke_presets"],
+            "stroke_shortcuts": state["stroke_shortcuts"],
             "current_stroke": state["current_stroke"],
             "sync_shortcut": state["sync_shortcut"],
             "opacity": state["opacity"],
@@ -213,13 +212,13 @@ def main(page: ft.Page):
         cfg = load_config()
         state["folder"] = cfg.get("folder", "")
         state["key"] = cfg.get("key", "")
-        if "delay_presets" in cfg: state["delay_presets"] = cfg["delay_presets"]
+        state["delay_offset"] = cfg.get("delay_offset", 0)
         if "stroke_presets" in cfg:
             state["stroke_presets"] = {k: tuple(v) for k, v in cfg["stroke_presets"].items()}
-        state["current_delay_preset"] = cfg.get("current_delay_preset", "Speaker")
+        if "stroke_shortcuts" in cfg:
+            state["stroke_shortcuts"] = cfg["stroke_shortcuts"]
         state["current_stroke"] = cfg.get("current_stroke", "Full")
         state["sync_shortcut"] = cfg.get("sync_shortcut", "X1")
-        state["tune_value"] = state["delay_presets"].get(state["current_delay_preset"], 0)
         state["opacity"] = cfg.get("opacity", 1.0)
 
     load()
@@ -233,15 +232,10 @@ def main(page: ft.Page):
     lbl_time = ft.Text("--:--", size=11, color=ft.Colors.GREY_400)
     lbl_conn = ft.Text("● Disconnected", size=11, color=ft.Colors.GREY_500)
     lbl_sync = ft.Text("● Ready", size=11, color=ft.Colors.GREY_500)
-
-    dd_delay = ft.Dropdown(
-        options=[ft.dropdown.Option(k) for k in state["delay_presets"]],
-        value=state["current_delay_preset"], width=260, height=40, text_size=12,
-        content_padding=5, on_select=lambda e: on_delay_change(e),
-    )
+    lbl_stroke = ft.Text("", size=11, color=ft.Colors.BLUE_200, weight=ft.FontWeight.BOLD)
 
     tune_field = ft.TextField(
-        value=str(state["tune_value"]), width=60, height=30, text_size=12,
+        value=str(state["delay_offset"]), width=60, height=30, text_size=12,
         content_padding=5, text_align=ft.TextAlign.CENTER
     )
 
@@ -350,11 +344,9 @@ def main(page: ft.Page):
         page.update()
 
     # --- Logic ---
-    def on_delay_change(e):
-        state["current_delay_preset"] = e.control.value
-        state["tune_value"] = state["delay_presets"].get(state["current_delay_preset"], 0)
-        tune_field.value = str(state["tune_value"])
-        page.update()
+    def update_stroke_label():
+        mn, mx = state["stroke_presets"].get(state["current_stroke"], (0, 100))
+        lbl_stroke.value = f"Stroke: {state['current_stroke']} ({mn}-{mx})"
 
     def update_tune_field(delta):
         try:
@@ -366,8 +358,7 @@ def main(page: ft.Page):
     async def apply_tune(e=None):
         try:
             val = int(tune_field.value)
-            state["delay_presets"][state["current_delay_preset"]] = val
-            state["tune_value"] = val
+            state["delay_offset"] = val
             save()
             await do_sync()
         except ValueError:
@@ -419,7 +410,7 @@ def main(page: ft.Page):
                 state["handy"].set_slide(mn, mx)
                 hwnd2 = find_potplayer()
                 video_pos = get_potplayer_state(hwnd2)["current_ms"]
-                offset = state["delay_presets"].get(state["current_delay_preset"], 0)
+                offset = state["delay_offset"]
                 compensation = state["handy"].last_rtt_ms // 2
                 state["handy"].play(video_pos + compensation + offset, state["handy"].estimated_server_time())
             await asyncio.to_thread(_network)
@@ -469,9 +460,13 @@ def main(page: ft.Page):
 
     btn_connect.on_click = connect_toggle
 
-    async def select_stroke(name: str):
+    async def apply_stroke(name: str):
         state["current_stroke"] = name
+        update_stroke_label()
         await do_sync()
+
+    async def select_stroke(e):
+        await apply_stroke(e.control.data)
 
     # --- Pages ---
     def show_home():
@@ -494,8 +489,9 @@ def main(page: ft.Page):
             ft.IconButton(ft.Icons.GAMEPAD, tooltip="Stroke", on_click=lambda e: show_stroke(), icon_size=24, width=40, height=40, padding=0),
         ], alignment=ft.MainAxisAlignment.SPACE_EVENLY)
 
+        update_stroke_label()
         main_content.controls.extend([
-            lbl_file, lbl_time, dd_delay,
+            lbl_file, lbl_time, lbl_stroke,
             ft.Divider(height=1), tune_row,
             ft.Divider(height=1), status_col,
             btn_row,
@@ -506,17 +502,18 @@ def main(page: ft.Page):
     def show_stroke():
         num_items = len(state["stroke_presets"])
         rows = math.ceil(num_items / 2)
-        page.window.height = max(100 + (rows * 43), 160)
+        page.window.height = max(120 + (rows * 43), 180)
         main_content.controls.clear()
         grid = ft.GridView(expand=1, runs_count=2, max_extent=120, child_aspect_ratio=3.0, spacing=8, run_spacing=8)
         for name in state["stroke_presets"]:
-            grid.controls.append(ft.Button(name, on_click=lambda e, n=name: select_stroke(n), height=35,
+            grid.controls.append(ft.Button(name, data=name, on_click=select_stroke, height=35,
                 style=ft.ButtonStyle(padding=0, text_style=ft.TextStyle(size=12))))
+        status_row = ft.Row([lbl_stroke, lbl_sync], spacing=8, alignment=ft.MainAxisAlignment.CENTER)
         main_content.controls.extend([
             ft.Row([
                 ft.IconButton(ft.Icons.ARROW_BACK, on_click=lambda e: show_home(), icon_size=20, width=30, height=30, padding=0),
                 ft.Text("Stroke Presets", size=12, weight=ft.FontWeight.BOLD),
-            ]), grid,
+            ]), status_row, grid,
         ])
         page.update()
 
@@ -576,27 +573,86 @@ def main(page: ft.Page):
         page.update()
 
     def show_stroke_manage():
-        page.window.height = 320
+        page.window.height = 340
         main_content.controls.clear()
         list_view = ft.ListView(expand=1, spacing=4)
+
+        def shortcut_label(name):
+            return state["stroke_shortcuts"].get(name, "") or "Set shortcut"
+
+        async def capture_shortcut(name):
+            if not HAS_KEYBOARD:
+                show_snack("Keyboard library not found")
+                return
+            try: keyboard.unhook_all_hotkeys()
+            except: pass
+            show_snack(f"Press shortcut for {name} (Esc to cancel)")
+            combo = ""
+            try:
+                combo = await asyncio.to_thread(keyboard.read_hotkey)
+            except Exception as ex:
+                print(f"[LOG] read_hotkey error: {ex}")
+            if combo and combo.lower() != "esc":
+                low = combo.lower()
+                if not ("ctrl" in low or "alt" in low or "shift" in low or "win" in low):
+                    setup_global_hotkeys()
+                    show_snack("Must include a modifier like Ctrl/Alt/Shift")
+                    return
+                if low == state["sync_shortcut"].lower():
+                    setup_global_hotkeys()
+                    show_snack("Conflicts with Sync shortcut")
+                    return
+                for other, sc in state["stroke_shortcuts"].items():
+                    if other != name and sc.lower() == combo:
+                        setup_global_hotkeys()
+                        show_snack(f"Already used by {other}")
+                        return
+                state["stroke_shortcuts"][name] = combo
+                save()
+                show_snack(f"Saved shortcut {name} = {combo}")
+            else:
+                show_snack("Canceled")
+            setup_global_hotkeys()
+            refresh_list()
+
+        async def capture_click(e):
+            await capture_shortcut(e.control.data)
+
+        def clear_shortcut(e):
+            name = e.control.data
+            if name in state["stroke_shortcuts"]:
+                del state["stroke_shortcuts"][name]
+                save()
+                setup_global_hotkeys()
+                refresh_list()
 
         def refresh_list():
             list_view.controls.clear()
             for name, (mn, mx) in state["stroke_presets"].items():
-                list_view.controls.append(ft.Row([
+                row_controls = [
                     ft.Text(f"{name}: {mn}-{mx}", size=12, expand=True),
-                    ft.IconButton(ft.Icons.DELETE, data=name, on_click=delete_stroke, icon_size=16,
-                        width=30, height=30, padding=0, icon_color=ft.Colors.RED_400)
-                ]))
+                    ft.Button(shortcut_label(name), data=name, on_click=capture_click, height=30,
+                        style=ft.ButtonStyle(padding=0, text_style=ft.TextStyle(size=11))),
+                ]
+                if name in state["stroke_shortcuts"]:
+                    row_controls.append(ft.IconButton(ft.Icons.CLOSE, data=name, on_click=clear_shortcut,
+                        icon_size=14, width=26, height=30, padding=0, icon_color=ft.Colors.GREY_400,
+                        tooltip="Clear shortcut"))
+                row_controls.append(ft.IconButton(ft.Icons.DELETE, data=name, on_click=delete_stroke, icon_size=16,
+                    width=30, height=30, padding=0, icon_color=ft.Colors.RED_400))
+                list_view.controls.append(ft.Row(row_controls))
             page.update()
 
         def delete_stroke(e):
             name = e.control.data
             if name in state["stroke_presets"]:
                 del state["stroke_presets"][name]
+                state["stroke_shortcuts"].pop(name, None)
                 if state["current_stroke"] == name:
                     state["current_stroke"] = "Full" if "Full" in state["stroke_presets"] else list(state["stroke_presets"].keys())[0]
+                    update_stroke_label()
                 save()
+                setup_global_hotkeys()
                 refresh_list()
 
         name_field = ft.TextField(label="Name", width=80, height=35, text_size=12, content_padding=5)
@@ -712,7 +768,10 @@ def main(page: ft.Page):
     async def process_events():
         while True:
             event = await event_queue.get()
-            if event == "SYNC": await do_sync()
+            if event == "SYNC":
+                await do_sync()
+            elif isinstance(event, tuple) and len(event) == 2 and event[0] == "STROKE":
+                await apply_stroke(event[1])
             event_queue.task_done()
 
     def setup_global_hotkeys():
@@ -736,6 +795,14 @@ def main(page: ft.Page):
             try:
                 keyboard.add_hotkey("ctrl+alt+s", lambda: asyncio.run_coroutine_threadsafe(event_queue.put("SYNC"), page.loop))
             except Exception as ex: print(f"[LOG] Hotkey error: {ex}")
+        if HAS_KEYBOARD:
+            for name, combo in state["stroke_shortcuts"].items():
+                if not combo or combo.lower() == state["sync_shortcut"].lower():
+                    continue
+                try:
+                    keyboard.add_hotkey(combo, lambda n=name: asyncio.run_coroutine_threadsafe(event_queue.put(("STROKE", n)), page.loop))
+                except Exception as ex:
+                    print(f"[LOG] Stroke hotkey error ({name}: {combo}): {ex}")
 
     # --- Init ---
     show_home()
